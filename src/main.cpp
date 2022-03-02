@@ -28,18 +28,18 @@ SimpleTimer motorTimer(5000);
 
 //Variables
 //TODO: pin A2 is unused
-int humidifier = 9, igniter = 10, heater = 11, gasValve=12;
-int buzzer =A3;
-int upButton = 2,downButton = 4,selectButton = 3, okButton=0;
-int powerIn =7;
+uint8_t humidifier = 9, igniter = 10, heater = 11, gasValve=12;
+uint8_t buzzer =A3;
+uint8_t upButton = 2,downButton = 4,selectButton = 3, okButton=0;
+uint8_t powerIn =7;
 
-int menu = 1;
-int subMenu=0;
-int state1,state2,state3;
-int idle=1;
-int startStatus=1;
+uint8_t menu = 1;
+uint8_t subMenu=0;
+uint8_t state1,state2,state3;
+uint8_t idle=1;
+uint8_t startStatus=1;
 bool processInitiated=false;
-int _batteryValue=9;
+uint8_t _batteryValue=9;
 float minTempValue=37.4,maxTempValue= 38.4,minHumidityIncubation=45.0, maxHumidityIncubation=55, minHatchHum=70, maxHatchHum=75;
 
 ////Variables for landing_battery
@@ -49,7 +49,6 @@ float temp; //Stores temperature value
 
 // transmission variables
 SoftwareSerial WiFiSerial(5, 6); //Change pins here  tx=5, rx=6 on pcb
-int rxd_1 = 0, txd_1=1;
 
 unsigned long millisTime,secondsHolder=59;
 
@@ -91,6 +90,18 @@ void sendMasterData() {
 
 
 void setup() {
+    //EEPROM Setup Initialization
+//   // birdTypeNo = EEPROM.read(1);
+//   // incubationActive = EEPROM.read(2);
+//    //navigationValue = EEPROM.read(3);
+//    //conditionsSet = EEPROM.read(4);
+//EEPROM.write(5,0);
+    daysCounter = EEPROM.read(5);
+    // EEPROM.write(6,19);
+    day = EEPROM.read(6);
+    incubationDays = EEPROM.read(7);
+    hatchingDays = EEPROM.read(8);
+
     lcd.begin();
     lcd.clear();
     lcd.backlight();
@@ -103,8 +114,6 @@ void setup() {
     FN.fanSetup(8);  //pin 8 fanIn
     IS.IncubationMenuSetup();
 
-    lcd.setCursor(2,0);   //Set cursor to character 2 on line 0
-    lcd.print("Hello world! Tony");
     pinMode(igniter,OUTPUT);
     pinMode(humidifier,OUTPUT);
     pinMode(upButton,INPUT);
@@ -114,12 +123,14 @@ void setup() {
     pinMode(gasValve,OUTPUT);
     pinMode(powerIn,INPUT);
     pinMode(buzzer,OUTPUT);
+    lcd.clear();
 }
 
 void loop() {
     millisTime = (millis() / 1000);
     seconds = secondsHolder - millisTime;
     if (seconds < 0) {
+        Serial.println("*********************************");
         seconds = 59;
         minutes--;
         secondsHolder = millisTime + 59;
@@ -184,17 +195,22 @@ void loop() {
     if(idle==1){
 
         if(processInitiated==false){
-            lcd.setCursor(2,1);
+            lcd.setCursor(0,1);
             lcd.println("AFRITECH INCUBATORS ");
            //TODO: MK03 lcd.setCursor()
             Serial.print("hmm");
             FN.stopFan();
+            digitalWrite(heater,LOW);
+            digitalWrite(gasValve,LOW);
+            digitalWrite(igniter,LOW);
         }
 
 
         if(processInitiated==true){
 
-            IS.IncubationScreen(temp,90,hum,10,60.5);
+            IS.IncubationScreen(temp,90,hum,10,60.5,hours,minutes,seconds);
+            Serial.print("Time: ");
+            Serial.println(seconds);
             FN.startFan();
             //digitalWrite(humidifier,HIGH);
             //    FN.startFan();
@@ -369,60 +385,6 @@ void loop() {
 
     }
 
-////=============================================================================================
-//
-////this is the upButton
-    if(state1==1){
-        Serial.print("up button working fine");
-
-        if(okButton>0 && subMenu==0){
-            idle++;
-            menu--;
-            if(menu<1)
-                menu=4;
-            MF.MainMenu(menu);
-            Serial.println(menu);
-            Serial.println("@@@@@@@");
-        }
-
-        if(subMenu>0){
-            subMenu--;
-            if(subMenu<1 && menu==1){
-
-                subMenu=3;}
-
-            if(subMenu<1 && menu==2){
-
-                subMenu=2;}
-
-            if(menu==1)
-                MF.SubMainMenuIncubation(subMenu);
-
-            if(menu==2)
-                MF.SubMainMenuSettings(subMenu);
-
-            if(okButton==3){
-                startStatus--;
-
-                if(startStatus<1 &&menu==1)
-                    startStatus=2;
-
-                if(startStatus<1 && menu==2)
-                    startStatus=3;
-
-                if(menu==1)
-                    MF.Start_Back(processInitiated,startStatus);
-
-                if(menu==2)
-                    MF.languageSettings(startStatus);
-                Serial.print("Jeshi");
-            }
-        }
-
-        delay(200);
-
-    }
-
 
 ////==============================================================================================
 //ok button Pressed
@@ -505,6 +467,19 @@ void loop() {
                 lcd.setCursor(0,2);
                 lcd.print("Chicken...");
                 processInitiated=!processInitiated;
+                EEPROM.write(2, processInitiated);
+
+                firstTimer.reset();
+                secondsHolder = millisTime + 59;
+                seconds = secondsHolder - millisTime;
+                minutes = 59;
+                hours = 1;
+
+                daysCounter = 0;
+                EEPROM.write(5, daysCounter);
+
+                day = 1;
+                EEPROM.write(6, day);
                 delay(1000);
 
             }
