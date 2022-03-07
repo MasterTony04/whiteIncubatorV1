@@ -1,46 +1,55 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <OneWire.h>
 #include <Adafruit_Sensor.h>
 #include <LiquidCrystal_I2C.h>
 #include <EEPROM.h>
 #include <SimpleTimer.h>
-#include "DHT.h"
 #include <ArduinoJson.h>
 #include <SoftwareSerial.h>
-
-//Constants
-#define DHTPIN A0   // A1 is DHT 2 sensor
-#define DHTTYPE DHT11
-DHT dht(DHTPIN, DHTTYPE);
+#include <DallasTemperature.h>
 #include "DHT.h"
 
-LiquidCrystal_I2C lcd(0x27,20,4);
+//Constants
+//int thermistorPin = A0, thermistorValue;   // A1 is DHT 2 sensor
+#define DHTPIN A0     // what pin we're connected to
+#define DHTTYPE DHT22   // DHT 22  (AM2302)
+#define ONE_WIRE_BUS A1
+
+DHT dht(DHTPIN, DHTTYPE);
+OneWire oneWire(ONE_WIRE_BUS);
+
+DallasTemperature sensors(&oneWire);
+float celcius=0;
+
+LiquidCrystal_I2C lcd(0x27, 20, 4);
 
 // Classes
 #include "menus.h"
 #include "Incubation_Screen.h"
 #include "fanControl.h"
+#include "temperatureSensor.h"
 
 //Timers
 SimpleTimer firstTimer(1000);
-SimpleTimer ignitionTimer(300);  //300 initially
+SimpleTimer ignitionTimer(10000);  //10 secs initially
 SimpleTimer motorTimer(5000);
 
 //Variables
 //TODO: pin A2 is unused
-uint8_t humidifier = 9, igniter = 10, heater = 11, gasValve=12;
-uint8_t buzzer =A3;
-uint8_t upButton = 2,downButton = 4,selectButton = 3, okButton=0;
-uint8_t powerIn =7;
+uint8_t humidifier = 9, igniter = 10, heater = 11, gasValve = 12;
+uint8_t buzzer = A3;
+uint8_t upButton = 2, downButton = 4, selectButton = 3, okButton = 0;
+uint8_t powerIn = 7;
 
 uint8_t menu = 1;
-uint8_t subMenu=0;
-uint8_t state1,state2,state3;
-uint8_t idle=1;
-uint8_t startStatus=1;
-bool processInitiated=false;
-uint8_t _batteryValue=9;
-float minTempValue=37.4,maxTempValue= 38.4,minHumidityIncubation=45.0, maxHumidityIncubation=55, minHatchHum=70, maxHatchHum=75;
+uint8_t subMenu = 0;
+uint8_t state1, state2, state3;
+uint8_t idle = 1;
+uint8_t startStatus = 1;
+bool processInitiated = false;
+uint8_t _batteryValue = 9;
+float minTempValue = 37.4, maxTempValue = 38.4, minHumidityIncubation = 45.0, maxHumidityIncubation = 55, minHatchHum = 70, maxHatchHum = 75;
 
 ////Variables for landing_battery
 
@@ -50,23 +59,28 @@ float temp; //Stores temperature value
 // transmission variables
 SoftwareSerial WiFiSerial(5, 6); //Change pins here  tx=5, rx=6 on pcb
 
-unsigned long millisTime,secondsHolder=59;
+unsigned long millisTime, secondsHolder = 59;
 
-int seconds,minutes=59,hours=1,daysCounter=0,day=1,incubationDays,hatchingDays;
+int seconds, minutes = 59, hours = 1, daysCounter = 0, day = 1, incubationDays, hatchingDays;
 int hoursCounter = 0, minutesCounter = 0;
-bool startMotor=false;
+bool startMotor = false;
 
 //Buzzer
 bool buzzerToneActive = false;
 
 //PowerIn
-bool powerInStatus=0;
+bool powerInStatus = 0;
 
-bool startFanOut=false;
+bool startFanOut = false;
 
 bool powerPriority;
 
+bool ignitionStarted;
+
+bool ignitionDone;
+
 void exit();
+
 void action3();
 
 void sendMasterData() {
@@ -76,9 +90,9 @@ void sendMasterData() {
     array.add(startMotor);
     array.add(temp);
     array.add(hum);
- //   array.add(incubationActive);
+    //   array.add(incubationActive);
     array.add(powerPriority);
-   // array.add(birdTypeNo);
+    // array.add(birdTypeNo);
     array.add(incubationDays);
     array.add(hatchingDays);
     array.add(day);
@@ -92,7 +106,8 @@ void sendMasterData() {
 void setup() {
     //EEPROM Setup Initialization
 //   // birdTypeNo = EEPROM.read(1);
-//   // incubationActive = EEPROM.read(2);
+
+    processInitiated = EEPROM.read(2);
 //    //navigationValue = EEPROM.read(3);
 //    //conditionsSet = EEPROM.read(4);
 //EEPROM.write(5,0);
@@ -102,10 +117,13 @@ void setup() {
     incubationDays = EEPROM.read(7);
     hatchingDays = EEPROM.read(8);
 
+    //sensors initialization
+    sensors.begin();
+    dht.begin();
+
     lcd.begin();
     lcd.clear();
     lcd.backlight();
-    dht.begin();
 
     Serial.begin(9600);
     WiFiSerial.begin(9600);
@@ -114,15 +132,15 @@ void setup() {
     FN.fanSetup(8);  //pin 8 fanIn
     IS.IncubationMenuSetup();
 
-    pinMode(igniter,OUTPUT);
-    pinMode(humidifier,OUTPUT);
-    pinMode(upButton,INPUT);
-    pinMode(selectButton,INPUT);
-    pinMode(downButton,INPUT);
-    pinMode(heater,OUTPUT);
-    pinMode(gasValve,OUTPUT);
-    pinMode(powerIn,INPUT);
-    pinMode(buzzer,OUTPUT);
+    pinMode(igniter, OUTPUT);
+    pinMode(humidifier, OUTPUT);
+    pinMode(upButton, INPUT);
+    pinMode(selectButton, INPUT);
+    pinMode(downButton, INPUT);
+    pinMode(heater, OUTPUT);
+    pinMode(gasValve, OUTPUT);
+    pinMode(powerIn, INPUT);
+    pinMode(buzzer, OUTPUT);
     lcd.clear();
 }
 
@@ -168,16 +186,26 @@ void loop() {
     }
 
     //Egg turning motor initiator
-    if (motorTimer.isReady() && startMotor==true) {
+    if (motorTimer.isReady() && startMotor == true) {
         startMotor = false;
         motorTimer.reset();
     }
 
+    //DS18B temp sensor
+    sensors.requestTemperatures();
+    celcius=sensors.getTempCByIndex(0);
+
+    //DHT 22 temp & Hum Sensor
     hum = dht.readHumidity();
     temp= dht.readTemperature();
-    state1=digitalRead(upButton);
-    state2=digitalRead(downButton);
-    state3=digitalRead(selectButton);
+
+//ntc temp sensor
+//    thermistorValue = analogRead(thermistorPin);
+//    temp = ntc.getTemperature(thermistorValue);
+
+    state1 = digitalRead(upButton);
+    state2 = digitalRead(downButton);
+    state3 = digitalRead(selectButton);
 
     //power
     powerInStatus = digitalRead(powerIn);
@@ -192,72 +220,80 @@ void loop() {
     }
 
 
-    if(idle==1){
+    if (idle == 1) {
 
-        if(processInitiated==false){
-            lcd.setCursor(0,1);
+        if (processInitiated == false) {
+            lcd.setCursor(0, 1);
             lcd.println("AFRITECH INCUBATORS ");
-           //TODO: MK03 lcd.setCursor()
-            Serial.print("hmm");
+            //TODO: MK03 lcd.setCursor()
+            Serial.println("hmm");
             FN.stopFan();
-            digitalWrite(heater,LOW);
-            digitalWrite(gasValve,LOW);
-            digitalWrite(igniter,LOW);
+            digitalWrite(heater, LOW);
+            digitalWrite(gasValve, LOW);
+            digitalWrite(igniter, LOW);
         }
 
 
-        if(processInitiated==true){
+        if (processInitiated == true) {
 
-            IS.IncubationScreen(temp,90,hum,10,60.5,hours,minutes,seconds);
-            Serial.print("Time: ");
-            Serial.println(seconds);
+            Serial.println("************************************************");
+            Serial.print("Ok Button: ");
+            Serial.println(okButton);
+            Serial.print("up Button: ");
+            Serial.println(upButton);
+            Serial.print("down Button: ");
+            Serial.println(downButton);
+            Serial.print("Menu: ");
+            Serial.println(menu);
+            Serial.print("sub Menu: ");
+            Serial.println(subMenu);
+            Serial.print("start Status: ");
+            Serial.println(startStatus);
+            Serial.println("************************************************");
+
+            IS.IncubationScreen(temp, 90, hum, 10, celcius, hours, minutes, seconds);
             FN.startFan();
-            //digitalWrite(humidifier,HIGH);
-            //    FN.startFan();
-            //    digitalWrite(igniter,HIGH);
-            //    delay(30000);
-            //    FN.stopFan();
-            //    digitalWrite(igniter,LOW);
-            //    digitalWrite(humidifier,LOW);
-            //    delay(10000);
 
-            //temp Check
+
+           //// //temp Check
             if (temp <= minTempValue) {
-
-//TODO:Buzzer Alarm disabled for sabasaba event:
-
-                if (buzzerToneActive == true) {
-
-                    digitalWrite(buzzer, HIGH);          // changed here
-                } else {
-                    digitalWrite(buzzer, LOW);
-
-                }
-
-
+//
+//
+//                if (buzzerToneActive == true) {
+//
+//                    digitalWrite(buzzer, HIGH);          // changed here
+//                } else {
+//                    digitalWrite(buzzer, LOW);
+//
+//                }
+//
+//
                 if (powerPriority == 0) {
 //  // switch on the heaters because there is power
                     digitalWrite(heater, HIGH);
-                   // ignitionStarted = false;
+                    // ignitionStarted = false;
                     digitalWrite(gasValve, LOW);
 
                 }
-
-
-                if (powerPriority == 1) {       //TODO: switch on gas
+//
+//
+//                if (powerPriority == 1) {       //TODO: switch on gas
 //                    if (ignitionStarted == false) {
 //                        ignitionStarted = true;
-//                        sparkCounter = 0;
-//                        // =====================
+//                        ignitionDone = true;
+//                    digitalWrite(gasValve,HIGH);
+//                        digitalWrite(igniter,HIGH);
+////                        sparkCounter = 0;
+////                        // =====================
 //                        digitalWrite(heater, LOW);
 //                        ignitionTimer.reset();
 //                    }
                 }
-            } else {
-                noTone(buzzer);
-
-                //===========================
-            }
+//            } else {
+//                noTone(buzzer);
+//
+//                //===========================
+           // }
 
             if (temp == 37.5) {
                 if (powerPriority == 0) {
@@ -275,14 +311,14 @@ void loop() {
             }
             if (temp >= maxTempValue) {
                 //TODO: find what ignitionStarted meant
-              //  ignitionStarted = false;
+                //  ignitionStarted = false;
                 digitalWrite(gasValve, LOW);
                 digitalWrite(igniter, LOW);
                 digitalWrite(heater, LOW);
 
             }
 
-//======================================
+////======================================
 
 //Buzzer Timer counter
             if (firstTimer.isReady()) {
@@ -297,6 +333,12 @@ void loop() {
             }
 
             //TODO: igniter timer goes here
+
+            if(ignitionTimer.isReady() && ignitionDone==true){
+                digitalWrite(igniter,LOW);
+                ignitionDone=false;
+                ignitionTimer.reset();
+            }
 
 
             if (temp > 38.8) {
@@ -334,48 +376,50 @@ void loop() {
     }
 
     ////this is up upButton
-    if(state1==1){
+    if (state1 == 1) {
         Serial.print("up button working fine");
 
-        if(okButton>0 && subMenu==0){
+        if (okButton > 0 && subMenu == 0) {
             idle++;
             menu--;
-            if(menu<1)
-                menu=4;
+            if (menu < 1)
+                menu = 4;
             MF.MainMenu(menu);
             Serial.println(menu);
             Serial.println("@@@@@@@");
         }
 
-        if(subMenu>0){
+        if (subMenu > 0) {
             subMenu--;
-            if(subMenu<1 && menu==1){
+            if (subMenu < 1 && menu == 1) {
 
-                subMenu=3;}
+                subMenu = 3;
+            }
 
-            if(subMenu<1 && menu==2){
+            if (subMenu < 1 && menu == 2) {
 
-                subMenu=2;}
+                subMenu = 2;
+            }
 
-            if(menu==1)
+            if (menu == 1)
                 MF.SubMainMenuIncubation(subMenu);
 
-            if(menu==2)
+            if (menu == 2)
                 MF.SubMainMenuSettings(subMenu);
 
-            if(okButton==3){
+            if (okButton == 3) {
                 startStatus--;
 
-                if(startStatus<1 &&menu==1)
-                    startStatus=2;
+                if (startStatus < 1 && menu == 1)
+                    startStatus = 2;
 
-                if(startStatus<1 && menu==2)
-                    startStatus=3;
+                if (startStatus < 1 && menu == 2)
+                    startStatus = 3;
 
-                if(menu==1)
-                    MF.Start_Back(processInitiated,startStatus);
+                if (menu == 1)
+                    MF.Start_Back(processInitiated, startStatus);
 
-                if(menu==2)
+                if (menu == 2)
                     MF.languageSettings(startStatus);
                 Serial.print("Jeshi");
             }
@@ -388,11 +432,11 @@ void loop() {
 
 ////==============================================================================================
 //ok button Pressed
-    if(state3==1){
+    if (state3 == 1) {
         Serial.print("ok button working fine");
         okButton++;
-        delay(200);
-        if(okButton==1){
+        delay(100);
+        if (okButton == 1) {
             idle++;
             MF.MainMenu(menu);
             Serial.println("first place");
@@ -400,7 +444,7 @@ void loop() {
 
         }
 
-        if(okButton==2){
+        if (okButton == 2) {
             subMenu++;
             Serial.println("second place");
             Serial.println(okButton);
@@ -423,35 +467,34 @@ void loop() {
         }
 
 
-
-        if(okButton==3){
+        if (okButton == 3) {
 
 //returning back to main menu
-            if(subMenu==3){
-                okButton=1;
+            if (subMenu == 3) {
+                okButton = 1;
                 Serial.print("this is running now subMenu ==3");
-                subMenu=0;
-                menu=1;
+                subMenu = 0;
+                menu = 1;
                 MF.MainMenu(menu);
             }
 
-            if(menu==2 && subMenu==2){
-                okButton=1;
-                subMenu=0;
-                menu=1;
+            if (menu == 2 && subMenu == 2) {
+                okButton = 1;
+                subMenu = 0;
+                menu = 1;
                 MF.MainMenu(menu);
             }
 
 
 //going to start or stop the incubation process
-            if(menu==1 && (subMenu==1 || subMenu==2)){
+            if (menu == 1 && (subMenu == 1 || subMenu == 2)) {
                 Serial.println("Sub.");
                 Serial.println(subMenu);
-                MF.Start_Back(processInitiated,startStatus);
+                MF.Start_Back(processInitiated, startStatus);
             }
 
 //change the language
-            if(menu==2 && subMenu==1){
+            if (menu == 2 && subMenu == 1) {
 
                 MF.languageSettings(startStatus);
             }
@@ -460,13 +503,13 @@ void loop() {
 
 
 //initiating the incubation process ... starting up the fans .. heater ..egg turner etc
-        if(okButton==4 && startStatus==1 && menu==1){
+        if (okButton == 4 && startStatus == 1 && menu == 1) {
             lcd.clear();
 
-            if(subMenu==1){
-                lcd.setCursor(0,2);
+            if (subMenu == 1) {
+                lcd.setCursor(0, 2);
                 lcd.print("Chicken...");
-                processInitiated=!processInitiated;
+                processInitiated = !processInitiated;
                 EEPROM.write(2, processInitiated);
 
                 firstTimer.reset();
@@ -484,56 +527,57 @@ void loop() {
 
             }
 
-            if(subMenu==2){
-                lcd.setCursor(0,2);
+            if (subMenu == 2) {
+                lcd.setCursor(0, 2);
                 lcd.print("GuineaFowl..");
-                processInitiated=!processInitiated;
+                processInitiated = !processInitiated;
+                EEPROM.write(2, processInitiated);
                 delay(1000);
             }
 
             lcd.clear();
-            idle=1;
-            okButton=0;
-            menu=1;
-            subMenu=0;
+            idle = 1;
+            okButton = 0;
+            menu = 1;
+            subMenu = 0;
         }
 
 //back from the start or stop of incubation process
-        if(okButton==4 && startStatus==2 &&menu==1){
+        if (okButton == 4 && startStatus == 2 && menu == 1) {
             Serial.println("imefika hapa");
-            okButton=2;
+            okButton = 2;
             lcd.clear();
-            subMenu=1;
-            startStatus=1;
+            subMenu = 1;
+            startStatus = 1;
             MF.SubMainMenuIncubation(subMenu);
         }
 
 //back from languageSettings
-        if(okButton==4 && menu==2 && startStatus==3){
+        if (okButton == 4 && menu == 2 && startStatus == 3) {
             Serial.println("jjjj");
             Serial.println(startStatus);
-            okButton=2;
+            okButton = 2;
             lcd.clear();
-            subMenu=1;
-            menu=2;
-            startStatus=1;
+            subMenu = 1;
+            menu = 2;
+            startStatus = 1;
             MF.SubMainMenuSettings(subMenu);
         }
 
 
-        if(okButton==4 && menu==2 &&(startStatus==2 || startStatus==1)){
+        if (okButton == 4 && menu == 2 && (startStatus == 2 || startStatus == 1)) {
 
-            if(startStatus==1){
+            if (startStatus == 1) {
                 lcd.clear();
-                lcd.setCursor(2,1);
+                lcd.setCursor(2, 1);
                 lcd.println("Please Wait...");
                 delay(1000);
                 exit();
             }
 
-            if(startStatus==2){
+            if (startStatus == 2) {
                 lcd.clear();
-                lcd.setCursor(2,1);
+                lcd.setCursor(2, 1);
                 lcd.println("Tafadhali Subiri...");
                 delay(1000);
                 exit();
@@ -547,43 +591,44 @@ void loop() {
 ////=============================================================================================
 
 //this is the downButton Arrow
-    if(state2==1){
+    if (state2 == 1) {
         Serial.println("State1 down");
 
-        if(subMenu==0 && okButton>0){
+        if (subMenu == 0 && okButton > 0) {
             idle++;
             menu++;
-            if(menu>4)
-                menu=1;
+            if (menu > 4)
+                menu = 1;
             lcd.clear();
             MF.MainMenu(menu);
-            Serial.println(menu);}
+            Serial.println(menu);
+        }
 
 
-        if(subMenu>0){
+        if (subMenu > 0) {
             subMenu++;
-            if(subMenu>3 && menu==1)
-                subMenu=1;
-            if(subMenu>2 && menu==2)
-                subMenu=1;
+            if (subMenu > 3 && menu == 1)
+                subMenu = 1;
+            if (subMenu > 2 && menu == 2)
+                subMenu = 1;
             Serial.print("mastertony is great");
-            if(menu==1)
+            if (menu == 1)
                 MF.SubMainMenuIncubation(subMenu);
 
-            if(menu==2)
+            if (menu == 2)
                 MF.SubMainMenuSettings(subMenu);
 
-            if(okButton==3){
+            if (okButton == 3) {
                 startStatus++;
-                if(startStatus>2 && menu==1)
-                    startStatus=1;
-                if(startStatus>3 && menu==2)
-                    startStatus=1;
+                if (startStatus > 2 && menu == 1)
+                    startStatus = 1;
+                if (startStatus > 3 && menu == 2)
+                    startStatus = 1;
 
-                if(menu==1)
-                    MF.Start_Back(processInitiated,startStatus);
+                if (menu == 1)
+                    MF.Start_Back(processInitiated, startStatus);
 
-                if(menu==2)
+                if (menu == 2)
                     MF.languageSettings(startStatus);
             }
         }
@@ -596,10 +641,10 @@ void loop() {
 
 void exit() {
     lcd.clear();
-    idle=1;
-    okButton=0;
-    subMenu=0;
-    menu=1;
+    idle = 1;
+    okButton = 0;
+    subMenu = 0;
+    menu = 1;
 
     daysCounter = 0;
     EEPROM.write(5, daysCounter);
@@ -611,12 +656,12 @@ void exit() {
 void action3() {
 
     lcd.clear();
-    lcd.setCursor(2,1);
+    lcd.setCursor(2, 1);
     lcd.print("Still under Dev...");
     delay(1000);
-    okButton=1;
-    menu=1;
-    subMenu=0;
+    okButton = 1;
+    menu = 1;
+    subMenu = 0;
     MF.MainMenu(menu);
 
 }
